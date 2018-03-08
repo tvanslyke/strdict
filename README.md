@@ -1,5 +1,5 @@
 # StringDict
-[![Language](https://img.shields.io/badge/language-Python-3.6-blue.svg)](https://github.com/python/cpython) [![Language](https://img.shields.io/badge/language-C++17-blue.svg)](https://isocpp.org/) [![License](https://img.shields.io/badge/license-MIT-blue.svg)](https://opensource.org/licenses/MIT)
+[![LanguagePython](https://img.shields.io/badge/Language-Python3.6-green.svg)](https://github.com/python/cpython) [![LanguageCPP](https://img.shields.io/badge/Language-C++17-blue.svg)](https://isocpp.org/) [![License](https://img.shields.io/badge/license-MIT-blue.svg)](https://opensource.org/licenses/MIT)
 
 A Python3.6 extension that adds a string-keys-only, dict-like type with an emphasis on fast lookup.  Presently this project is still in "beta", but passes the test suite.  The test suite is a modified version of the CPython dict test suite.
 
