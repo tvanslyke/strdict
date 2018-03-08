@@ -24,12 +24,12 @@ struct KeyMetaInfo
 	}
 	~KeyMetaInfo()
 	{
-		if(not buff_.buf)
+		if((not error()) and (not buff_is_dummy()))
 			PyBuffer_Release(&buff_);
 	}
 
 	bool error() const
-	{ return buff_.buf; }
+	{ return (buff_.buf == nullptr); }
 
 	operator bool() const
 	{ return not error(); }
@@ -39,9 +39,19 @@ struct KeyMetaInfo
 		auto buff_cpy = as_error_.buff_;
 		return KeyMetaInfo(buff_cpy);
 	}
+	static void ensure_no_error(Py_buffer* buff)
+	{
+		if(not buff->buf)
+			buff->buf = (void*)dummy_buff;
+	}
 private:
+	bool buff_is_dummy() const
+	{
+		return (const char*)buff_.buf == (const char*)dummy_buff;
+	}
+	static constexpr const char dummy_buff[1] = {'\0'};
 	static const KeyMetaInfo as_error_;
-	Py_buffer buff_{nullptr};
+	Py_buffer buff_{as_error_.buff_};
 };
 
 const KeyMetaInfo KeyMetaInfo::as_error_([]() {
@@ -67,10 +77,21 @@ std::pair<KeyInfo, KeyMetaInfo> make_key_info(PyObject* key)
 {
 	KeyInfo ki;
 	Py_buffer buff;
+	buff.buf = nullptr;
 	if(0 != KeyInfo_Init(key, &ki, &buff))
-		return std::make_pair(ki, KeyMetaInfo(buff));
-	else
+	{
+		assert(PyErr_Occurred());
+		assert(KeyMetaInfo::as_error().error());
 		return std::make_pair(ki, KeyMetaInfo::as_error());
+	}
+	else
+	{
+		assert(ki.kind >= PY_BYTES);
+		assert(ki.kind <= PY_UCS4);
+		KeyMetaInfo::ensure_no_error(&buff);
+		assert(not KeyMetaInfo(buff).error());
+		return std::make_pair(ki, KeyMetaInfo(buff));
+	}
 }
 
 KeyInfo make_key_info(const StringDictEntry* ent)

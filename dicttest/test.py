@@ -13,10 +13,8 @@ class DictTest(unittest.TestCase):
     def test_invalid_keyword_arguments(self):
         class Custom(strdict):
             pass
-        print('\nh')
         Custom({'': 1})
-        print('h')
-        for invalid in {1 : 2}, Custom({1 : 2}):
+        for invalid in {1 : 2}, dict({1 : 2}):
             with self.assertRaises(TypeError):
                 strdict(**invalid)
             with self.assertRaises(TypeError):
@@ -43,7 +41,7 @@ class DictTest(unittest.TestCase):
         self.assertIn('a', d)
         self.assertIn('b', d)
         self.assertRaises(TypeError, d.keys, None)
-        self.assertEqual(repr(strdict(a=1).keys()), "[b'a']")
+        self.assertEqual(repr(strdict(a=1).keys()), "['a']")
 
     def test_values(self):
         d = strdict({})
@@ -60,7 +58,7 @@ class DictTest(unittest.TestCase):
         d = {'1':2}
         self.assertEqual(set(d.items()), {('1', 2)})
         self.assertRaises(TypeError, d.items, None)
-        self.assertEqual(repr(strdict(a=1).items()), "[(b'a', 1)]")
+        self.assertEqual(repr(strdict(a=1).items()), "[('a', 1)]")
 
     def test_contains(self):
         d = strdict({})
@@ -163,7 +161,7 @@ class DictTest(unittest.TestCase):
                     def __next__(self):
                         if self.i:
                             self.i = 0
-                            return ('a', i)
+                            return ('a', self.i)
                         raise Exc
                 return BogonIter()
 
@@ -250,6 +248,8 @@ class DictTest(unittest.TestCase):
         # In this test we want to hit the slow/compacting
         # branch of dict.copy() and make sure it works OK.
         d = strdict({str(k): k for k in range(1000)})
+        assert '1' in d
+        assert '0' in d
         for k in range(950):
             del d[str(k)]
         d2 = d.copy()
@@ -292,7 +292,10 @@ class DictTest(unittest.TestCase):
         x = BadHash()
         d[x] = 42
         x.fail = True
-        self.assertRaises(Exc, d.setdefault, x, [])
+        try:
+            d.setdefault(x, [])
+        except Exc:
+            self.fail("setdefault() called custom hash, but should have used str.__hash__()")
 
     def test_setdefault_atomic(self):
         # Issue #13521: setdefault() calls __hash__ and __eq__ only once.
@@ -314,7 +317,7 @@ class DictTest(unittest.TestCase):
         hashed2 = Hashed('r')
         y.setdefault(hashed2, [])
         self.assertEqual(hashed1.hash_count, 1)
-        self.assertEqual(hashed2.hash_count, 1)
+        self.assertEqual(hashed2.hash_count, 0)
         self.assertEqual(hashed1.eq_count + hashed2.eq_count, 0)
 
     def test_setitem_atomic_at_resize(self):
@@ -334,12 +337,12 @@ class DictTest(unittest.TestCase):
 
         hashed1 = Hashed('s')
         # 5 items
-        y = {hashed1: 5, '0': 0, '1': 1, '2': 2, '3': 3}
+        y = strdict({hashed1: 5, '0': 0, '1': 1, '2': 2, '3': 3})
         hashed2 = Hashed('r')
         # 6th item forces a resize
         y[hashed2] = []
         self.assertEqual(hashed1.hash_count, 1)
-        self.assertEqual(hashed2.hash_count, 1)
+        self.assertEqual(hashed2.hash_count, 0)
         self.assertEqual(hashed1.eq_count + hashed2.eq_count, 0)
 
     def test_popitem(self):
@@ -354,14 +357,14 @@ class DictTest(unittest.TestCase):
                 for i in range(size):
                     a[repr(i)] = str(i)
                     if copymode < 0:
-                        b[repr(i)] = str(i)
+                        b[repr(i)] = repr(i)
                 if copymode > 0:
                     b = a.copy()
                 for i in range(size):
                     ka, va = ta = a.popitem()
-                    self.assertEqual(va, int(ka))
+                    self.assertEqual(va, ka)
                     kb, vb = tb = b.popitem()
-                    self.assertEqual(vb, int(kb))
+                    self.assertEqual(vb, kb)
                     self.assertFalse(copymode < 0 and ta != tb)
                 self.assertFalse(a)
                 self.assertFalse(b)
@@ -401,7 +404,10 @@ class DictTest(unittest.TestCase):
         x = BadHash()
         d[x] = 42
         x.fail = True
-        self.assertRaises(Exc, d.pop, x)
+        try:
+            d.pop(x)
+        except Exc:
+            self.fail("pop() called custom hash, but should have used str.__hash__()")
 
     def test_mutating_lookup(self):
         # changing dict during a lookup (issue #14417)
@@ -432,7 +438,7 @@ class DictTest(unittest.TestCase):
         self.assertEqual(repr(d), "strdict({'1': 2})")
         d = strdict({})
         d['1'] = d
-        self.assertEqual(repr(d), "strdict({'1': {...}})")
+        self.assertEqual(repr(d), "strdict({'1': strdict({...})})")
 
         class Exc(Exception): pass
 
@@ -556,27 +562,13 @@ class DictTest(unittest.TestCase):
 
             def __missing__(self, key):
                 return 42
-        print(D.keys)
-        print(getframeinfo(currentframe()).lineno)
         d = D({'1': 2, '3': 4})
-        print(d.values)
-        print(getframeinfo(currentframe()).lineno)
         self.assertEqual(d['1'], 2)
-        print(getframeinfo(currentframe()).lineno)
         self.assertEqual(d['3'], 4)
-        print(getframeinfo(currentframe()).lineno)
         self.assertNotIn('2', d)
-        print(getframeinfo(currentframe()).lineno)
-        print(d.keys());
-        print(d.keys());
-        from sys import stdout
-        stdout.flush()
-        print(d.keys());
         self.assertNotIn('2', d.keys())
-        print(getframeinfo(currentframe()).lineno)
         self.assertEqual(d['2'], 42)
 
-        print(getframeinfo(currentframe()).lineno)
         e = strdict()
         with self.assertRaises(KeyError) as c:
             e['42']
@@ -643,6 +635,23 @@ class DictTest(unittest.TestCase):
         d['9'] = 6
 
 
+    def test_resize_copy_and_deletion(self):
+        # test adding a bunch of items and then deleting them
+        keys = [str(i) for i in range(1000)]
+        d = strdict()
+        dcpy = d.copy()
+        self.assertEqual(d, dcpy)
+        for k in keys:
+            d[k] = int(int(k) ** 2)
+        self.assertEqual(len(d), len(keys))
+        self.assertNotEqual(d, dcpy)
+        for k in keys[30:]:
+            del d[k]
+        self.assertNotEqual(d, dcpy)
+        self.assertNotEqual(len(d), len(keys))
+        for k in (keys[:30])[::-1]:
+            dcpy[k] = int(int(k) ** 2)
+        self.assertEqual(d, dcpy)
 
     def _not_tracked(self, t):
         # Nested containers can take several collections to untrack
@@ -701,7 +710,6 @@ class DictTest(unittest.TestCase):
 
         dict_a[X('')] = 0
         dict_b[X('')] = X('')
-        print(dict_a, dict_b)
         self.assertTrue(dict_a == dict_b)
 
     def test_dictitems_contains_use_after_free(self):

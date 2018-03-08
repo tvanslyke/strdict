@@ -147,9 +147,8 @@ struct Entry {
 
 	std::optional<Entry> make_copy() const
 	{
-		assert(self());
 		if(is_empty())
-			return Entry(nullptr, hash());
+			return Entry(nullptr, -1);
 		StringDictEntry* ent_cpy = Entry_Copy(self());
 		if(not ent_cpy)
 			return std::nullopt;
@@ -317,6 +316,7 @@ struct StringDictBase:
 	template <class Pred>
 	void visit_with_hash(Py_hash_t hash_value, Pred pred)
 	{
+		assert(mask + 1 == offsets.size());
 		uhash_t perturb;
 		// copy the hash into 'perturb' bit-for-bit...
 		// Py_hash_t is signed, but we want unsigned because 
@@ -529,22 +529,24 @@ private:
 
 	void grow_remove_empty_entries() noexcept
 	{
-		// predicates
-		auto is_empty = Entry::is_open;
-		auto is_not_empty = Entry::is_closed;
-		
 		// don't do an O(n) traversal if there are no empty entries
 		if(occupied == static_cast<Py_ssize_t>(size()))
 		{
-			assert(std::all_of(entries.begin(), entries.end(), is_not_empty));
+			assert(std::all_of(entries.begin(), entries.end(), Entry::is_closed));
 			return;
 		}
 
-		auto empties = std::partition(entries.begin(), entries.end(), is_not_empty);
+		// TODO: optimize for the fact that we know how many empty entries there are.
+		//       also std::partition() uses swaps, but we only need moves.
+
+		// put all of the empty entries at the end of the array
+		auto empties = std::partition(entries.begin(), entries.end(), Entry::is_closed);
+
 		// postconditions
-		assert(std::all_of(empties, entries.end(), is_empty));
-		assert(std::all_of(entries.begin(), empties, is_not_empty));
+		assert(std::all_of(empties, entries.end(), Entry::is_open));
+		assert(std::all_of(entries.begin(), empties, Entry::is_closed));
 		assert(empties - entries.begin() == occupied);
+
 		// erase all of the empty elements at the end of the entries vector
 		entries.erase(empties, entries.end());
 	}
@@ -552,6 +554,8 @@ private:
 protected:
 	Entry* add_entry(const KeyInfo& ki, Py_ssize_t offsets_index, PyObject* value) 
 	{
+		assert(ki.kind <= PY_UCS4);
+		assert(ki.kind >= PY_BYTES);
 		++occupied;
 		int did_reserve = reserve_load_factor(); 
 		if(did_reserve < 0) // attempted to reserve but failed
@@ -562,6 +566,8 @@ protected:
 		}
 		try
 		{
+			assert(ki.kind <= PY_UCS4);
+			assert(ki.kind >= PY_BYTES);
 			entries.emplace_back(ki, value);
 		} 
 		catch(const std::bad_alloc&)
@@ -733,7 +739,7 @@ struct StringDict:
 			PythonObject k(key);
 			Py_INCREF(value);
 			PythonObject v(value);
-			PythonObject obj(this->set(key, value, true));
+			PythonObject obj(this->set(key, value, false));
 			if(not obj)
 				return -1;
 		}
@@ -798,6 +804,10 @@ struct StringDict:
 			}
 			else if(ent->is_empty())
 			{
+				assign_entry(ki, ent, other_ent.get_value());
+			}
+			else 
+			{
 				ent->set_value(other_ent.get_value());
 			}
 			return false;
@@ -808,11 +818,14 @@ struct StringDict:
 	
 	int update_from_object(PyObject* o)
 	{
-		if(StringDict_Check(o) and (o != static_cast<PyObject*>(this)))
-			return update_from_string_dict(*static_cast<StringDict*>(o));
+		if(StringDict_Check(o))
+			if(o != static_cast<PyObject*>(this))
+				return 0;
+			else
+				return update_from_string_dict(*static_cast<StringDict*>(o));
 		else if(PyDict_Check(o))
 			return update_from_kwargs(o);
-		else if(PyMapping_Check(o) and PyObject_HasAttrString(o, "keys")) 
+		else if(PyMapping_Check(o) and PyObject_HasAttrString(o, "items")) 
 			return update_from_mapping(o);
 		else if(PyObject* it = PyObject_GetIter(o); (not it))
 			return -1;
@@ -865,9 +878,9 @@ struct StringDict:
 	{
 		if(size() == 0)
 			return PyUnicode_FromString("strdict({})");
-		auto count = Py_ReprEnter(this);
-		if(count)
+		if(auto count = Py_ReprEnter(this); count)
 			return (count > 0) ? PyUnicode_FromString("strdict({...})") : nullptr;
+
 		// scope guard to ensure we call Py_ReprLeave before exiting
 		auto repr_guard = make_scope_guard([&](){ Py_ReprLeave(this); });
 
@@ -878,7 +891,7 @@ struct StringDict:
 		};
 		auto writer_guard = make_scope_guard_cancelable(writer_guardfunc);
 		writer.overallocate = 1;
-		if(0 != _PyUnicodeWriter_WriteASCIIString(&writer, "strdict({", 12))
+		if(0 != _PyUnicodeWriter_WriteASCIIString(&writer, "strdict({", 9))
 			return nullptr;
 		
 		auto write_entry = [&, comma = '\0'](const auto& ent) mutable {
@@ -888,7 +901,7 @@ struct StringDict:
 				comma = ',';
 			else if(0 != _PyUnicodeWriter_WriteASCIIString(&writer, comma_sep, 2))
 				return true;
-			else if(0 != ent.write_repr(&writer))
+			if(0 != ent.write_repr(&writer))
 				return true;
 			return false;
 		};
@@ -905,7 +918,12 @@ struct StringDict:
 	{
 		if(size() == 0)
 		{
-			PyErr_SetString(PyExc_KeyError, "Attempt to call .pop() on an empty strdict.");
+			if(default_value)
+			{
+				Py_INCREF(default_value);
+				return default_value;
+			}
+			PyErr_SetString(PyExc_KeyError, "Attempt to call .pop() with no default on an empty strdict.");
 			return nullptr;
 		}
 		[[maybe_unused]]
@@ -1014,7 +1032,10 @@ struct StringDict:
 		auto [idx, ent] = find_existing(ki);
 		(void)idx;
 		if(not ent)
+		{
+			PyErr_SetObject(PyExc_KeyError, key);
 			return -1;
+		}
 		assert(not ent->is_empty());
 		remove_entry(ent);
 		return 0;
@@ -1201,6 +1222,7 @@ struct StringDict:
 		
 		auto list_size = static_cast<Py_ssize_t>(size());
 		PyObject** list_items = PySequence_Fast_ITEMS(itemlist);
+		[[maybe_unused]]
 		PyObject** list_items_stop = list_items + list_size;
 		auto visit_ent = [&](const Entry& ent) {
 			assert(not ent.is_empty());
@@ -1275,8 +1297,6 @@ bool StringDict_CheckExact(PyObject* self)
 bool StringDict_Check(PyObject* self)
 { return PyObject_IsInstance(self, StringDict_GetType()); }
 
-static bool StringDict_CheckBoth(PyObject* left, PyObject* right)
-{ return StringDict_Check(left) and StringDict_Check(right); }
 
 static bool StringDict_CheckErr(PyObject* self)
 {
@@ -1299,7 +1319,7 @@ static StringDict* to_string_dict(PyObject* self)
 	return static_cast<StringDict*>(self);
 }
 
-static std::tuple<StringDict*, PyObject*, PyObject*> dictmethod_2args(PyObject* self, PyObject* args)
+static std::tuple<StringDict*, PyObject*, PyObject*> dictmethod_2args(PyObject* self, PyObject* args, bool none_is_default = true)
 {
 	auto* dict = to_string_dict(self);
 	if(not dict)
@@ -1308,7 +1328,7 @@ static std::tuple<StringDict*, PyObject*, PyObject*> dictmethod_2args(PyObject* 
 	PyObject* default_value_ = nullptr;
 	if(not PyArg_ParseTuple(args, "O|O", &key_, &default_value_))
 		return {nullptr, nullptr, nullptr};
-	if(not default_value_)
+	if((not default_value_) and (none_is_default))
 		default_value_ = Py_None;
 	return std::make_tuple(dict, key_, default_value_);
 }
@@ -1540,7 +1560,7 @@ static PyObject* strdict_clear(PyObject* self)
 
 static PyObject* strdict_pop(PyObject* self, PyObject* args)
 {
-	auto [dict, key, default_value] = dictmethod_2args(self, args);
+	auto [dict, key, default_value] = dictmethod_2args(self, args, false);
 	if(not dict)
 		return nullptr;
 	return dict->pop(key, default_value);

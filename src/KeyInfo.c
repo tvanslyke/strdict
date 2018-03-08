@@ -1,4 +1,5 @@
 #include "KeyInfo.h"
+#include <stdbool.h>
 
 void DataKind_Info(DataKind kind, Py_ssize_t* size, Py_ssize_t* alignment)
 {
@@ -57,36 +58,46 @@ int KeyInfo_Init(PyObject* key, KeyInfo* ki, Py_buffer* buff)
 	{
 		ki->key = key;
 		ki->hash = PyUnicode_Type.tp_hash(key);
-		if(ki->hash == -1 && PyErr_Occurred())
+		if((ki->hash == -1) && PyErr_Occurred())
 			return -1;
+
 		int _kind = PyUnicode_KIND(key);
 		switch(_kind)
 		{
 		case PyUnicode_1BYTE_KIND:
 			ki->kind = PY_UCS1;
+			break;
 		case PyUnicode_2BYTE_KIND:
 			ki->kind = PY_UCS2;
+			break;
 		case PyUnicode_4BYTE_KIND:
 			ki->kind = PY_UCS4;
+			break;
 		default:
 			assert(false);
+			ki->kind = -1;
 		};
 		ki->data = PyUnicode_DATA(key);
 		ki->data_size = PyUnicode_GET_LENGTH(key);
+		assert(ki->kind >= PY_BYTES);
+		assert(ki->kind <= PY_UCS4);
+		return 0;
 	}
-	else if(tp != &PyBytes_Type || PyType_IsSubclass(tp, &PyBytes_Type))
+	else if(PyBytes_Check(key))
 	{
 		ki->key = key;
 		ki->kind = PY_BYTES;
 		ki->hash = PyBytes_Type.tp_hash(key);
-		if(ki->hash == -1 && PyErr_Occurred())
+		if((ki->hash == -1) && PyErr_Occurred())
 			return -1;
 		char* data;
 		Py_ssize_t len;
-		if(PyBytes_AsStringAndSize(&data, &len))
+		if(0 != PyBytes_AsStringAndSize(key, &data, &len))
 			return -1;
 		ki->data = (unsigned char*)data;
 		ki->data_size = len;
+		assert(ki->kind >= PY_BYTES);
+		assert(ki->kind <= PY_UCS4);
 		return 0;
 	}
 	else
@@ -100,6 +111,8 @@ int KeyInfo_Init(PyObject* key, KeyInfo* ki, Py_buffer* buff)
 		ki->data = buff->buf;
 		ki->data_size = buff->len;
 		ki->hash = _Py_HashBytes(ki->data, ki->data_size);
+		assert(ki->kind >= PY_BYTES);
+		assert(ki->kind <= PY_UCS4);
 		return 0;
 	}
 

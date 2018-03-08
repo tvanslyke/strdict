@@ -2,10 +2,15 @@
 #define LEB128_H
 
 #include <stdint.h>
+#include <stddef.h>
+#include <assert.h>
+#include <limits.h>
+
+/* Simple LEB128 encode-decode routines. */
 
 typedef struct leb128_encoding 
 {
-	unsigned char encoding[9];
+	unsigned char encoding[10];
 	unsigned char len;
 } Leb128Encoding;
 

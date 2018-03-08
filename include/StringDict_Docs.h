@@ -1,5 +1,7 @@
 #ifndef STRINGDICT_DOCS_
 #define STRINGDICT_DOCS_
+// Docstrings.  Mostly stolen from cpython/Objects/dictobject.c.h
+
 
 PyDoc_STRVAR(strdict_fromkeys__doc__,
 "fromkeys($type, iterable, value=None, /)\n"

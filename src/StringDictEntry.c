@@ -10,14 +10,26 @@
 static const uintptr_t pyptr_lowbits_mask = alignof(PyObject) - 1;
 
 static const uintptr_t pyobject_pointer_lowbits = 
-	alignof(PyObject) == 1 ? ((uintptr_t)0) :
-	alignof(PyObject) == 2 ? ((uintptr_t)1) :
-	alignof(PyObject) == 4 ? ((uintptr_t)2) :
-	alignof(PyObject) == 8 ? ((uintptr_t)3) :
-	alignof(PyObject) == 16 ? ((uintptr_t)4) : 0;
+	(alignof(PyObject) ==  1) ? ((uintptr_t)0) :
+	(alignof(PyObject) ==  2) ? ((uintptr_t)1) :
+	(alignof(PyObject) ==  4) ? ((uintptr_t)2) :
+	(alignof(PyObject) ==  8) ? ((uintptr_t)3) :
+	(alignof(PyObject) == 16) ? ((uintptr_t)4) : 0;
 
-#define PYOBJECT_MASKED_(op) ((PyObject*)(((uintptr_t)(op)) & ~pyobject_pointer_lowbits))
-#define PYOBJECT_TAG_(op) (((uintptr_t)(op)) & pyobject_pointer_lowbits)
+#define PYOBJECT_MASKED_(op) ((PyObject*)(((uintptr_t)(op)) & ~pyptr_lowbits_mask))
+#define PYOBJECT_TAG_(op) (((uintptr_t)(op)) & pyptr_lowbits_mask)
+
+static PyObject* tag_pyobject(PyObject* obj, uintptr_t tag)
+{
+	assert(tag < alignof(PyObject));
+	assert(PYOBJECT_TAG_(obj) == 0);
+	assert((tag & (uintptr_t)obj) == 0);
+	assert((tag & pyptr_lowbits_mask) == tag);
+	uintptr_t tagged = (uintptr_t)obj;
+	tagged |= tag;
+	PyObject* o = (void*)tagged;
+	return o;
+}
 
 typedef unsigned char uchar_t;
 struct string_dict_entry
@@ -36,10 +48,7 @@ static PyObject* Entry_GetValue(const StringDictEntry* self)
 
 static PyObject* Entry_GetKey(const StringDictEntry* self)
 {
-	if(self->cached_key)
-		return PYOBJECT_MASKED_(self->cached_key);
-	else
-		return self->cached_key;
+	return PYOBJECT_MASKED_(self->cached_key);
 }
 
 static uintptr_t Entry_ValueTag(const StringDictEntry* self)
@@ -70,6 +79,7 @@ static DataKind Entry_Kind(const StringDictEntry* self)
 		break;
 	case 2:
 	case 3:
+	case 4:
 		assert(Entry_KeyTag(self) < 4);
 		assert(Entry_ValueTag(self) == 0);
 		kind = Entry_KeyTag(self);
@@ -93,47 +103,22 @@ static int Entry_SetKind(StringDictEntry* self, DataKind kind)
 	case 1:
 		// set the least significant bit if it's set in kind
 		if(kind & 0x01)
-			self->cached_key = ((char*)self->cached_key) + 1;
+			self->cached_key = tag_pyobject(Entry_GetKey(self), kind & 0x01);
 		// set the least significant bit if the 2nd least significant bit is set in kind
 		if(kind & 0x02)
-			self->value = ((char*)self->value) + 1;
+			self->value = tag_pyobject(Entry_GetValue(self), ((kind & 0x02) >> 1));
 		break;
 	case 2:
 	case 3:
+	case 4:
 		// offset the cached_key pointer by 'kind' (sets the low bits)
-		self->cached_key = ((char*)self->cached_key) + kind;
+		self->cached_key = tag_pyobject(Entry_GetKey(self), kind);
 		break;
 	default:
+		return 0;
 		assert(0);
 	};
 	return 1;
-}
-
-
-
-
-static int Entry_KeyIsUnicode(const StringDictEntry* self)
-{
-	assert(self);
-	assert(Entry_Kind(self) >= PY_BYTES);
-	assert(Entry_Kind(self) <= PY_UCS4);
-	assert((!Entry_GetKey(self)) || (PyUnicode_Check(Entry_GetKey(self)) == (Entry_Kind(self) != PY_BYTES)));
-	return Entry_Kind(self) != PY_BYTES;
-}
-
-
-static int Entry_KeyIsBytes(const StringDictEntry* self)
-{
-	return !Entry_KeyIsUnicode(self);
-}
-
-
-static void* tag_pyobject(PyObject* obj, uintptr_t tag)
-{
-	assert(tag < alignof(PyObject));
-	assert(PYOBJECT_TAG_(obj) == 0);
-	assert((tag & (uintptr_t)obj) == 0);
-	return (void*)(((uintptr_t)obj) | tag);
 }
 
 static const uchar_t* Entry_DataAndSize(const StringDictEntry* self, Py_ssize_t* size, DataKind kind)
@@ -167,6 +152,11 @@ void Entry_SetValue(StringDictEntry* self, PyObject* new_value)
 	Py_DECREF(Entry_ExchangeValue(self, new_value));
 }
 
+static void* Entry_RawAlloc(size_t len)
+{
+	return malloc(len);
+}
+
 static void* Entry_Alloc(Py_ssize_t header_size, Py_ssize_t data_size, Py_ssize_t item_size)
 {
 	Py_ssize_t data_bytes = data_size * item_size;
@@ -181,8 +171,9 @@ static void* Entry_Alloc(Py_ssize_t header_size, Py_ssize_t data_size, Py_ssize_
 	// the data, not aligned at all, starting at the first byte after the header
 	// one null byte
 	size_t alloc_size = sizeof(StringDictEntry) + header_size + data_bytes + 1;
-	return malloc(alloc_size);
+	return Entry_RawAlloc(alloc_size);
 }
+
 
 static void Entry_Free(void* ent_mem)
 {
@@ -192,6 +183,8 @@ static void Entry_Free(void* ent_mem)
 StringDictEntry* Entry_FromKeyInfo(const KeyInfo* ki, PyObject* value)
 {
 	assert(value);
+	assert(ki->kind <= PY_UCS4);
+	assert(ki->kind >= PY_BYTES);
 	Leb128Encoding enc = leb128_encode(ki->data_size);
 	Py_ssize_t header_size = enc.len;
 	
@@ -217,7 +210,9 @@ StringDictEntry* Entry_FromKeyInfo(const KeyInfo* ki, PyObject* value)
 	}
 	else
 	{
-		assert(Entry_SetKind(ent, ki->kind));
+		int res = Entry_SetKind(ent, ki->kind);
+		(void)res;
+		assert(res);
 	}
 	
 	memcpy(data, enc.encoding, enc.len);
@@ -258,7 +253,9 @@ int Entry_Matches(const StringDictEntry* self, const KeyInfo* ki)
 		return 1;
 	DataKind kind = Entry_Kind(self);
 	if(ki->kind != kind)
+	{
 		return 0;
+	}
 	const uchar_t* begin;
 	const uchar_t* end;
 	Py_ssize_t len = Entry_Data(self, &begin, &end, kind);
@@ -283,6 +280,10 @@ int Entry_WriteRepr(const StringDictEntry* self, _PyUnicodeWriter* writer)
 	assert(writer);
 	PyObject* key = Entry_GetKey(self);
 	DataKind kind = Entry_Kind(self);
+	// surrounding quotes for key
+	if(0 != _PyUnicodeWriter_WriteASCIIString(writer, "'", 1))
+		return -1;
+
 	if((!key) || kind == PY_BYTES)
 	{
 		assert(Entry_Kind(self) == PY_BYTES);
@@ -290,7 +291,7 @@ int Entry_WriteRepr(const StringDictEntry* self, _PyUnicodeWriter* writer)
 		const uchar_t* first;
 		const uchar_t* last;
 		Py_ssize_t len = Entry_Data(self, &first, &last, PY_BYTES);
-		assert(last - first == len);
+		assert((last - first) == len);
 		if(0 != _PyUnicodeWriter_WriteASCIIString(writer, (char*)first, len))
 			return -1;
 	}
@@ -300,6 +301,9 @@ int Entry_WriteRepr(const StringDictEntry* self, _PyUnicodeWriter* writer)
 		if(0 != _PyUnicodeWriter_WriteStr(writer, key))
 			return -1;
 	}
+	// surrounding quotes for key
+	if(0 != _PyUnicodeWriter_WriteASCIIString(writer, "'", 1))
+		return -1;
 	
 	if(0 != _PyUnicodeWriter_WriteASCIIString(writer, ": ", 2))
 		return -1;
@@ -314,22 +318,41 @@ int Entry_WriteRepr(const StringDictEntry* self, _PyUnicodeWriter* writer)
 	return errc;
 }
 
+StringDictEntry* Entry_Copy(const StringDictEntry* self)
+{
+	assert(self);
+	DataKind kind = Entry_Kind(self);
+	const uchar_t* first;
+	const uchar_t* last;
+	Entry_Data(self, &first, &last, kind);
+	assert((*(char*)last) == '\0');
+	size_t allocd = ((char*)last - (char*)self) + 1;
+	uchar_t* mem = Entry_RawAlloc(allocd);
+	if(!mem)
+		return NULL;
+	memcpy(mem, self, allocd);
+	Py_XINCREF(Entry_GetKey(self));
+	assert(Entry_Value(self));
+	Py_INCREF(Entry_GetValue(self));
+	return (StringDictEntry*)mem;
+}
+
 void Entry_Delete(StringDictEntry* self)
 {
 	assert(self);
 	assert(Entry_Value(self));
-	Py_SETREF(self->value, NULL);
-	Py_XDECREF(self->cached_key);
+	PyObject* key = Entry_GetKey(self);
+	PyObject* value = Entry_GetValue(self);
+	self->value = NULL;
+	self->cached_key = NULL;
+	Py_XDECREF(key);
+	Py_DECREF(value);
 	Entry_Free(self);
 }
 
 void Entry_Clear(StringDictEntry* self)
 {
-	assert(self);
-	assert(Entry_Value(self));
-	Py_CLEAR(self->value);
-	Py_XDECREF(self->cached_key);
-	Entry_Free(self);
+	Entry_Delete(self);
 }
 
 
@@ -367,6 +390,6 @@ PyObject* Entry_Key(const StringDictEntry* self_)
 	assert(PYOBJECT_TAG_(bytes_obj) == 0);
 
 	uintptr_t tag = Entry_KeyTag(self);
-	self->cached_key = (PyObject*)(((uintptr_t)bytes_obj) | tag);
+	self->cached_key = tag_pyobject(bytes_obj, tag);
 	return Entry_GetKey(self);
 }
